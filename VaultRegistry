@@ -1,0 +1,132 @@
+// SPDX-License-Identifier: GPL-3.0
+pragma solidity ^0.8.19;
+
+/// @notice Improved Demo contract: safer withdraws, clear modifiers, better naming, no redundant state, reentrancy guard.
+contract Demo {
+    address public owner;
+
+    struct User {
+        string name;
+        uint age;
+        address wallet;
+        uint balance;
+    }
+
+    // events (consistent naming + indexed where useful)
+    event UserRegistered(address indexed wallet, string name, uint age);
+    event UserUpdated(address indexed wallet, string name);
+    event EtherDeposited(address indexed wallet, uint amount);
+    event EtherWithdrawn(address indexed wallet, uint amount);
+    event OwnerWithdrawAll(uint amount);
+
+    mapping(address => User) public users;
+    address[] public userAddresses;
+
+    // Simple reentrancy guard (avoid importing external libs here)
+    uint private unlocked = 1;
+    modifier nonReentrant() {
+        require(unlocked == 1, "Reentrant call");
+        unlocked = 0;
+        _;
+        unlocked = 1;
+    }
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Not contract owner");
+        _;
+    }
+
+    modifier userExist(address _addr) {
+        require(users[_addr].wallet != address(0), "User does not exist");
+        _;
+    }
+
+    constructor() {
+        owner = msg.sender;
+        // optional: auto-register owner with a default name if you want owner to also use user features
+        // users[owner] = User("owner", 0, owner, 0);
+        // userAddresses.push(owner);
+    }
+
+    /// @notice Register a new user (must not exist)
+    function register(string memory _name, uint _age) external {
+        require(users[msg.sender].wallet == address(0), "User already exists");
+        require(bytes(_name).length > 0, "Name required");
+        users[msg.sender] = User(_name, _age, msg.sender, 0);
+        userAddresses.push(msg.sender);
+        emit UserRegistered(msg.sender, _name, _age);
+    }
+
+    /// @notice Update user name
+    function updateUser(string memory _newName) external userExist(msg.sender) {
+        require(bytes(_newName).length > 0, "Name required");
+        users[msg.sender].name = _newName;
+        emit UserUpdated(msg.sender, _newName);
+    }
+
+    /// @notice Get all users (be careful: this can be expensive on-chain if many users)
+    function getAllUsers() external view returns (User[] memory) {
+        User[] memory result = new User[](userAddresses.length);
+        for (uint i = 0; i < userAddresses.length; i++) {
+            result[i] = users[userAddresses[i]];
+        }
+        return result;
+    }
+
+    /// @notice Deposit ETH to your user balance (caller must be registered)
+    function deposit() external payable userExist(msg.sender) {
+        require(msg.value > 0, "No ETH sent");
+        users[msg.sender].balance += msg.value;
+        emit EtherDeposited(msg.sender, msg.value);
+    }
+
+    /// @notice Withdraw your own balance (users withdraw their own funds)
+    /// Uses checks-effects-interactions + nonReentrant + call pattern
+    function withdraw(uint _amount) external userExist(msg.sender) nonReentrant {
+        require(users[msg.sender].balance >= _amount, "Insufficient balance");
+        users[msg.sender].balance -= _amount;
+
+        // use call to forward gas safely and check result
+        (bool sent, ) = payable(msg.sender).call{value: _amount}("");
+        require(sent, "Transfer failed");
+
+        emit EtherWithdrawn(msg.sender, _amount);
+    }
+
+    /// @notice Owner can withdraw entire contract balance to owner address
+    function withdrawAllToOwner() external onlyOwner nonReentrant {
+        uint amount = address(this).balance;
+        require(amount > 0, "No funds");
+        // send to owner
+        (bool sent, ) = payable(owner).call{value: amount}("");
+        require(sent, "Owner transfer failed");
+
+        emit OwnerWithdrawAll(amount);
+    }
+
+    /// @notice receive/fallback: accept plain ETH transfers.
+    /// Behavior: if sender is registered, credit their user balance; otherwise keep in contract balance.
+    receive() external payable {
+        if (users[msg.sender].wallet != address(0)) {
+            users[msg.sender].balance += msg.value;
+            emit EtherDeposited(msg.sender, msg.value);
+        } // else: ETH stays in contract (owner can later withdraw via withdrawAllToOwner)
+    }
+
+    fallback() external payable {
+        if (users[msg.sender].wallet != address(0)) {
+            users[msg.sender].balance += msg.value;
+            emit EtherDeposited(msg.sender, msg.value);
+        }
+    }
+
+    /// @notice Helper view: contract balance (so we removed redundant state variable)
+    function contractBalance() external view returns (uint) {
+        return address(this).balance;
+    }
+
+    /// @notice View single user
+    function getUser(address _addr) external view userExist(_addr) returns (User memory) {
+        return users[_addr];
+    }
+}
